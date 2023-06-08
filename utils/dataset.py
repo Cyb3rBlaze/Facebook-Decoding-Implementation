@@ -34,7 +34,7 @@ class CustomDataset(Dataset):
         self.audio_sample_rate = bundle.sample_rate
         self.brain_data_sample_rate = 500
 
-
+        # audio file parsing
         all_audio_data = None
 
         for _, file in enumerate(os.listdir(audio_dir)):
@@ -47,7 +47,6 @@ class CustomDataset(Dataset):
                 all_audio_data = waveform
             else:
                 all_audio_data = torch.hstack((all_audio_data, waveform))
-
 
         # reshape for 3 second samples
 
