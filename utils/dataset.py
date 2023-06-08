@@ -20,13 +20,18 @@ import wave
 
 # custom dataset used to load pairs for training
 class CustomDataset(Dataset):
-    def __init__(self, subject_path, audio_dir):
+    def __init__(self, subject_path, audio_dir, T_out):
         mat = scipy.io.loadmat(subject_path)
         raw_data = mat["raw"][0][0][3][0][0]
         sos = butter(10, (0.1, 200), 'bandpass', fs=500, output='sos')
-        filtered = sosfilt(sos, raw_data[0])
 
-        brain_data = torch.tensor(filtered)
+        brain_data = None
+
+        for channel in raw_data:
+            if brain_data == None:
+                brain_data = torch.tensor(sosfilt(sos, channel))
+            else:
+                brain_data = torch.vstack((brain_data, torch.tensor(sosfilt(sos, channel))))
 
         # for resampling purposes
         bundle = torchaudio.pipelines.WAV2VEC2_ASR_BASE_960H
@@ -54,7 +59,7 @@ class CustomDataset(Dataset):
 
         all_audio_data = all_audio_data.view(-1, self.audio_sample_rate*3)
 
-        brain_data = brain_data[:, :brain_data.shape[1]//1500*1500].view(brain_data.shape[0], -1, 1500)
+        brain_data = torch.sum(brain_data[:, :brain_data.shape[1]//1500*1500].view(brain_data.shape[0], -1, 150, 10), dim=3)[:, :, :T_out]
 
         print("Brain data shape: " + str(brain_data.shape))
         print("Waveform shape: " + str(all_audio_data.shape))
