@@ -22,32 +22,41 @@ from tqdm import tqdm
 
 # custom dataset used to load pairs for training
 class CustomDataset(Dataset):
-    def __init__(self, data_dir, T_out, num_subjects):
+    def __init__(self, data_dir, T_out, num_subjects, exclude):
 
         all_subject_brain_data = None
 
         # 49 subjects
         for i in tqdm(range(1, num_subjects + 1)):
-            if i < 10:
-                mat = scipy.io.loadmat(data_dir + "/S0" + str(i) + ".mat")
-            else:
-                mat = scipy.io.loadmat(data_dir + "/S" + str(i) + ".mat")
-            raw_data = mat["raw"][0][0][3][0][0]
-            sos = butter(10, (0.1, 200), 'bandpass', fs=500, output='sos')
-
-            brain_data = None
-
-            for channel in raw_data:
-                if brain_data == None:
-                    brain_data = torch.tensor(sosfilt(sos, channel))
+            if i not in exclude:
+                if i < 10:
+                    mat = scipy.io.loadmat(data_dir + "/S0" + str(i) + ".mat")
                 else:
-                    brain_data = torch.vstack((brain_data, torch.tensor(sosfilt(sos, channel))))
-            
-            if i == 1:
-                all_subject_brain_data = torch.unsqueeze(brain_data, 0)
-            else:
-                min_time_dim = min(brain_data.shape[-1], all_subject_brain_data.shape[-1])
-                all_subject_brain_data = torch.vstack((all_subject_brain_data[:, :61, :min_time_dim], torch.unsqueeze(brain_data, 0)[:, :61, :min_time_dim]))
+                    mat = scipy.io.loadmat(data_dir + "/S" + str(i) + ".mat")
+                raw_data = mat["raw"][0][0][3][0][0]
+                sos = butter(10, (0.1, 200), 'bandpass', fs=500, output='sos')
+
+                brain_data = None
+
+                for channel in raw_data:
+                    final_filtered = sosfilt(sos, channel)
+
+                    final_filtered = final_filtered - np.mean(final_filtered[:int(500*0.5)])
+                    final_filtered = (final_filtered - np.mean(final_filtered)) / np.std(final_filtered)
+                    final_filtered = np.clip(final_filtered, -20, 20)
+
+                    if brain_data == None:
+                        brain_data = torch.tensor(final_filtered)
+                    else:
+                        brain_data = torch.vstack((brain_data, torch.tensor(final_filtered)))
+                
+                if i == 1:
+                    all_subject_brain_data = torch.unsqueeze(brain_data, 0)
+                else:
+                    min_time_dim = min(brain_data.shape[-1], all_subject_brain_data.shape[-1])
+                    all_subject_brain_data = torch.vstack((all_subject_brain_data[:, :61, :min_time_dim], torch.unsqueeze(brain_data, 0)[:, :61, :min_time_dim]))
+
+        num_subjects = num_subjects - len(exclude)
 
         # for resampling purposes
         bundle = torchaudio.pipelines.WAV2VEC2_ASR_BASE_960H
