@@ -5,9 +5,11 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 import scipy.io
-from scipy.signal import butter, sosfilt, resample
+from scipy.signal import butter, sosfilt
 
 import matplotlib.pyplot as plt
+
+from sklearn.preprocessing import RobustScaler
 
 import numpy as np
 
@@ -22,7 +24,7 @@ from tqdm import tqdm
 
 # custom dataset used to load pairs for training
 class CustomDataset(Dataset):
-    def __init__(self, data_dir, T_out, num_subjects, exclude):
+    def __init__(self, data_dir, T_out, num_subjects, exclude, val=False):
 
         all_subject_brain_data = None
 
@@ -30,7 +32,9 @@ class CustomDataset(Dataset):
         bundle = torchaudio.pipelines.WAV2VEC2_XLSR53
 
         self.audio_sample_rate = 16000
-        self.brain_data_sample_rate = 150
+        self.brain_data_sample_rate = 50
+
+        min_samples = float("inf")
 
         # 49 subjects
         for i in tqdm(range(1, num_subjects + 1)):
@@ -45,24 +49,27 @@ class CustomDataset(Dataset):
                 brain_data = None
 
                 for channel in raw_data:
-                    final_filtered = sosfilt(sos, channel)
+                    final_filtered = torch.tensor(sosfilt(sos, channel))
 
-                    final_filtered = resample(final_filtered, int(len(final_filtered)*(self.brain_data_sample_rate/500)))
+                    final_filtered = torchaudio.functional.resample(final_filtered, 500, self.brain_data_sample_rate)
+                    final_filtered = final_filtered[:final_filtered.shape[0]//(self.brain_data_sample_rate*3)*self.brain_data_sample_rate*3]
 
-                    final_filtered = final_filtered - np.mean(final_filtered[:int(self.brain_data_sample_rate*0.5)])
-                    final_filtered = (final_filtered - np.mean(final_filtered)) / np.std(final_filtered)
-                    final_filtered = np.clip(final_filtered, -20, 20)
+                    final_filtered = final_filtered.reshape((-1, 1, self.brain_data_sample_rate*3))
 
                     if brain_data == None:
-                        brain_data = torch.tensor(final_filtered)
+                        brain_data = final_filtered
                     else:
-                        brain_data = torch.vstack((brain_data, torch.tensor(final_filtered)))
+                        brain_data = torch.cat((brain_data, final_filtered), dim=1)    # [num_samples, num_channels, time_steps]
                 
                 if i == 1:
                     all_subject_brain_data = torch.unsqueeze(brain_data, 0)
                 else:
-                    min_time_dim = min(brain_data.shape[-1], all_subject_brain_data.shape[-1])
-                    all_subject_brain_data = torch.vstack((all_subject_brain_data[:, :61, :min_time_dim], torch.unsqueeze(brain_data, 0)[:, :61, :min_time_dim]))
+                    if min_samples > brain_data.shape[0]:
+                        min_samples = brain_data.shape[0]
+                    all_subject_brain_data = torch.vstack((all_subject_brain_data[:, :min_samples, :61, :self.brain_data_sample_rate*3], torch.unsqueeze(brain_data, 0)[:, :min_samples, :61, :self.brain_data_sample_rate*3]))
+        
+        initial_mean = torch.unsqueeze(torch.mean(all_subject_brain_data[:, :, :, :int(self.brain_data_sample_rate*0.5)], dim=3), 3)
+        all_subject_brain_data = all_subject_brain_data - initial_mean
 
         num_subjects = num_subjects - len(exclude)
 
@@ -82,27 +89,37 @@ class CustomDataset(Dataset):
 
         all_audio_data = all_audio_data[0][:all_audio_data.shape[1]//(self.audio_sample_rate*3)*(self.audio_sample_rate*3)]
 
-        all_audio_data = all_audio_data.view(-1, self.audio_sample_rate*3).repeat(num_subjects, 1, 1).reshape((-1, 16000))
+        all_audio_data = all_audio_data.view(-1, self.audio_sample_rate*3).repeat(num_subjects, 1, 1)
 
-        self.all_subject_brain_data = torch.mean(all_subject_brain_data[:, :, :all_subject_brain_data.shape[-1]//450*450].view(num_subjects, all_subject_brain_data.shape[1], -1, 50, 9), dim=4)[:, :, :, :T_out]
+        self.num_samples = min(all_subject_brain_data.shape[1], all_audio_data.shape[1])
 
-        self.num_samples = min(self.all_subject_brain_data.shape[2] * self.all_subject_brain_data.shape[0], all_audio_data.shape[0])
+        if val == True:
+            self.subject_num = torch.arange(num_subjects).repeat(self.num_samples, 1)[int(self.num_samples*0.8):self.num_samples].view(-1)
+            self.all_subject_brain_data = all_subject_brain_data[:, int(self.num_samples*0.8):self.num_samples, :, :].reshape((-1, 61, self.brain_data_sample_rate*3))[:, :, :T_out]
+            all_audio_data = all_audio_data[:, int(self.num_samples*0.8):self.num_samples, :]
+        else:
+            self.subject_num = torch.arange(num_subjects).repeat(self.num_samples, 1)[:int(self.num_samples*0.8)].view(-1)
+            self.all_subject_brain_data = all_subject_brain_data[:, :int(self.num_samples*0.8), :, :].reshape((-1, 61, self.brain_data_sample_rate*3))[:, :, :T_out]
+            all_audio_data = all_audio_data[:, :int(self.num_samples*0.8), :]
 
-        # tranpose channel and num_samples dims
-        self.all_subject_brain_data = torch.transpose(self.all_subject_brain_data, 1, 2).reshape((-1, 61, T_out))[:self.num_samples, :, :]
-        self.all_audio_data = all_audio_data[:self.num_samples]
+        self.all_audio_data = all_audio_data.reshape((-1, self.audio_sample_rate*3))
 
-        # for subject specific layer
-        self.subject_num = torch.arange(num_subjects).repeat_interleave(self.num_samples//num_subjects)
+        for i, sample in tqdm(enumerate(self.all_subject_brain_data)):
+            for j, channel_data in enumerate(sample):
+                transformer = RobustScaler().fit(channel_data.numpy().reshape((-1, 1)))
+                transformed_data = transformer.transform(channel_data.numpy().reshape((-1, 1)))
+                self.all_subject_brain_data[i, j] = torch.tensor(transformed_data.reshape((-1)))
+        
+        self.all_subject_brain_data = torch.clip(self.all_subject_brain_data, -20, 20)
 
         print("Brain data shape: " + str(self.all_subject_brain_data.shape))
-        print("Waveform shape: " + str(all_audio_data.shape))
+        print("Waveform shape: " + str(self.all_audio_data.shape))
         print("Subject num shape: " + str(self.subject_num.shape))
         print("Audio sampling rate (Hz): " + str(self.audio_sample_rate))
-        print("Brain data sampling rate (Hz): 500")
+        print("Brain data sampling rate (Hz): " + str(self.brain_data_sample_rate))
 
     def __len__(self):
-        return self.num_samples
+        return self.all_subject_brain_data.shape[0]
 
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
@@ -114,4 +131,4 @@ class CustomDataset(Dataset):
         return self.audio_sample_rate
 
     def get_brain_data_sample_rate(self):
-        return 500
+        return self.brain_data_sample_rate
