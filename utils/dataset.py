@@ -1,29 +1,17 @@
+import os
+import scipy.io
 import torch
 import torchaudio
-from torch.utils.data import Dataset
 
-from tqdm import tqdm
-
-import scipy.io
 from scipy.signal import butter, sosfilt
-
-import matplotlib.pyplot as plt
-
 from sklearn.preprocessing import RobustScaler
-
-import numpy as np
-
-import IPython
-
-import os
-
-import wave
-
+from torch.utils.data import Dataset
 from tqdm import tqdm
 
 
-# custom dataset used to load pairs for training
 class CustomDataset(Dataset):
+    """Custom dataset used to load pairs for training.
+    """
     def __init__(self, data_dir, T_out, num_subjects, exclude, val=False):
 
         all_subject_brain_data = None
